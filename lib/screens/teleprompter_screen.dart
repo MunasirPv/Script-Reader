@@ -2,7 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:gal/gal.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
 import 'dart:async';
+import 'package:fluttertoast/fluttertoast.dart';
+import 'recordings_list_screen.dart';
 
 class TeleprompterScreen extends StatefulWidget {
   final String script;
@@ -18,6 +22,7 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
   CameraController? _controller;
   List<CameraDescription>? _cameras;
   bool _isRecording = false;
+  bool _isPaused = false;
 
   // Teleprompter State
   final ScrollController _scrollController = ScrollController();
@@ -26,12 +31,33 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
   double _scrollSpeed = 2.0; // Pixels per tick (approx 60Hz)
   double _fontSize = 24.0;
   bool _showSettings = true;
+  String? _lastVideoPath;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
+    _loadLatestVideo();
+  }
+
+  Future<void> _loadLatestVideo() async {
+    final directory = await getApplicationDocumentsDirectory();
+    final String recordingsPath = '${directory.path}/Recordings';
+    final dir = Directory(recordingsPath);
+    if (await dir.exists()) {
+      final List<FileSystemEntity> files =
+          dir.listSync().where((item) => item.path.endsWith('.mp4')).toList()
+            ..sort(
+              (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+            );
+
+      if (files.isNotEmpty) {
+        setState(() {
+          _lastVideoPath = files.first.path;
+        });
+      }
+    }
   }
 
   Future<void> _initializeCamera() async {
@@ -44,13 +70,7 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
 
     if (statuses[Permission.camera] != PermissionStatus.granted ||
         statuses[Permission.microphone] != PermissionStatus.granted) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Camera and Microphone permissions are required'),
-          ),
-        );
-      }
+      if (mounted) {}
       return;
     }
 
@@ -75,15 +95,19 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
         }
       } else {
         if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('No camera found')));
+          Fluttertoast.showToast(
+            msg: "No camera found",
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+          );
         }
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error initializing camera: $e')),
+        Fluttertoast.showToast(
+          msg: "Error initializing camera: $e",
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
         );
       }
     }
@@ -144,6 +168,87 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
     });
   }
 
+  Future<void> _switchCamera() async {
+    if (_cameras == null || _cameras!.length < 2) return;
+
+    // Get current lens direction
+    final lensDirection = _controller!.description.lensDirection;
+    CameraDescription newCamera;
+
+    if (lensDirection == CameraLensDirection.front) {
+      newCamera = _cameras!.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => _cameras!.first,
+      );
+    } else {
+      newCamera = _cameras!.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.front,
+        orElse: () => _cameras!.first,
+      );
+    }
+
+    if (_controller != null) {
+      await _controller!.dispose();
+    }
+
+    _controller = CameraController(
+      newCamera,
+      ResolutionPreset.high,
+      enableAudio: true,
+    );
+
+    try {
+      await _controller!.initialize();
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      if (mounted) {
+        Fluttertoast.showToast(
+          msg: "Error switching camera: $e",
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+        );
+      }
+    }
+  }
+
+  Future<void> _pauseRecording() async {
+    if (_controller == null || !_isRecording) return;
+    try {
+      await _controller!.pauseVideoRecording();
+      setState(() {
+        _isPaused = true;
+        // Optional: pause scrolling too?
+        if (_isScrolling) _toggleScrolling();
+      });
+    } on CameraException catch (e) {
+      Fluttertoast.showToast(
+        msg: "Error pausing recording: $e",
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
+    }
+  }
+
+  Future<void> _resumeRecording() async {
+    if (_controller == null || !_isRecording) return;
+    try {
+      await _controller!.resumeVideoRecording();
+      setState(() {
+        _isPaused = false;
+        // Optional: resume scrolling too?
+        if (!_isScrolling) _toggleScrolling();
+      });
+    } on CameraException catch (e) {
+      Fluttertoast.showToast(
+        msg: "Error resuming recording: $e",
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
+    }
+  }
+
   Future<void> _startRecording() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
 
@@ -158,9 +263,11 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
         if (!_isScrolling) _toggleScrolling();
       });
     } on CameraException catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error starting recording: $e')));
+      Fluttertoast.showToast(
+        msg: "Error starting recording: $e",
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
     }
   }
 
@@ -171,34 +278,55 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
       XFile file = await _controller!.stopVideoRecording();
       setState(() {
         _isRecording = false;
+        _isPaused = false;
         if (_isScrolling)
           _toggleScrolling(); // Stop scrolling when recording stops
       });
 
-      // Save to gallery
-      await Gal.putVideo(file.path);
-      bool saved = true; // Gal throws if it fails
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              saved == true ? 'Video saved to gallery' : 'Failed to save video',
-            ),
-          ),
-        );
+      // Save to Application Documents Directory for In-App Gallery
+      final directory = await getApplicationDocumentsDirectory();
+      final String recordingsPath = '${directory.path}/Recordings';
+      await Directory(recordingsPath).create(recursive: true);
+
+      final String fileName =
+          'video_${DateTime.now().millisecondsSinceEpoch}.mp4';
+      final String newPath = '$recordingsPath/$fileName';
+
+      await File(file.path).copy(newPath);
+
+      // Update latest video path for thumbnail
+      _loadLatestVideo();
+
+      // Save to gallery using Gal on the NEW path (or old one, doesn't matter much but new one is safer)
+      // Gal.putVideo(newPath);
+      // The user says "The recorded video is not displaying the gallery". Let's try explicit save.
+      try {
+        await Gal.putVideo(newPath);
+        if (mounted) {
+          Fluttertoast.showToast(
+            msg: "Video saved to gallery and in-app storage",
+            backgroundColor: Colors.green,
+            textColor: Colors.white,
+          );
+        }
+      } catch (e) {
+        debugPrint("Gallery save error: $e");
+        if (mounted) {
+          Fluttertoast.showToast(
+            msg: "Saved locally, but gallery save failed: $e",
+            backgroundColor: Colors.orange,
+            textColor: Colors.white,
+          );
+        }
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error stopping recording or saving: $e')),
-      );
-    }
-  }
-
-  Future<void> _toggleRecording() async {
-    if (_isRecording) {
-      await _stopRecording();
-    } else {
-      await _startRecording();
+      if (mounted) {
+        Fluttertoast.showToast(
+          msg: "Error stopping recording: $e",
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+        );
+      }
     }
   }
 
@@ -307,17 +435,96 @@ class _TeleprompterScreenState extends State<TeleprompterScreen>
                         ],
                       ),
                       const SizedBox(height: 16),
-                      // Record Button
-                      FloatingActionButton(
-                        onPressed: _toggleRecording,
-                        backgroundColor: _isRecording
-                            ? Colors.red
-                            : Colors.white,
-                        child: Icon(
-                          _isRecording ? Icons.stop : Icons.videocam,
-                          color: _isRecording ? Colors.white : Colors.red,
-                          size: 32,
-                        ),
+                      // Controls Row
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (!_isRecording &&
+                              _cameras != null &&
+                              _cameras!.length > 1)
+                            FloatingActionButton(
+                              heroTag: "switch",
+                              mini: true,
+                              onPressed: _switchCamera,
+                              backgroundColor: Colors.white,
+                              child: const Icon(
+                                Icons.switch_camera,
+                                color: Colors.black,
+                              ),
+                            ),
+                          const SizedBox(width: 20),
+                          FloatingActionButton(
+                            heroTag: "record",
+                            onPressed: () {
+                              if (_isRecording) {
+                                if (_isPaused) {
+                                  _resumeRecording();
+                                } else {
+                                  _pauseRecording();
+                                }
+                              } else {
+                                _startRecording();
+                              }
+                            },
+                            backgroundColor: _isRecording
+                                ? (_isPaused ? Colors.orange : Colors.white)
+                                : Colors.red,
+                            child: Icon(
+                              _isRecording
+                                  ? (_isPaused ? Icons.play_arrow : Icons.pause)
+                                  : Icons.videocam,
+                              color: _isRecording
+                                  ? (_isPaused ? Colors.white : Colors.red)
+                                  : Colors.white,
+                              size: 32,
+                            ),
+                          ),
+                          const SizedBox(width: 20),
+                          if (_isRecording)
+                            FloatingActionButton(
+                              heroTag: "stop",
+                              mini: true,
+                              onPressed: _stopRecording,
+                              backgroundColor: Colors.red,
+                              child: const Icon(
+                                Icons.stop,
+                                color: Colors.white,
+                              ),
+                            )
+                          else
+                            GestureDetector(
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (context) =>
+                                        const RecordingsListScreen(),
+                                  ),
+                                );
+                              },
+                              child: Container(
+                                width: 50,
+                                height: 50,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Colors.grey[800],
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: _lastVideoPath != null
+                                    ? const Icon(
+                                        Icons.video_library,
+                                        color: Colors.white,
+                                      )
+                                    : const Icon(
+                                        Icons.photo_library,
+                                        color: Colors.white54,
+                                      ),
+                              ),
+                            ),
+                        ],
                       ),
                     ],
                   ),
